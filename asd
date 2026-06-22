@@ -14,7 +14,7 @@ local AnimalsData = {}
 local okA, resA = pcall(function()
     return require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
 end)
-if okA then AnimalsData = resA else warn("Failed to load AnimalsData.") end
+if okA then AnimalsData = resA end
 
 local allAnimalsCache = {}
 local PromptMemoryCache = {}
@@ -393,11 +393,6 @@ pcall(function()
     end
 end)
 
-local function getHRP_Old()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-
 local function findPromptInPodium(podium)
     for _, d in pairs(podium:GetDescendants()) do
         if d:IsA("ProximityPrompt") and d.Enabled then
@@ -558,14 +553,18 @@ thread = coroutine.create(function()
                 return
             end
             LAS.Start()
+
             AG.IsStealing = true
             AG.CurrentPetName = target.petName
             AG.StealProgress = 0
-            if AG.Mode == "Priority" then
-                LAS.AttemptSteal(target.prompt, {uid = target.uid, worldPosition = target.position, name = target.petName}, AG.StealDuration)
-            end
+
+            LAS.AttemptSteal(
+                target.prompt,
+                {uid = target.uid, worldPosition = target.position, name = target.petName},
+                AG.StealDuration
+            )
+
             local startTime = tick()
-            local lastRefire = startTime
             while tick() - startTime < AG.StealDuration do
                 if inRagdollCooldown() then
                     AG.IsStealing = false
@@ -574,21 +573,22 @@ thread = coroutine.create(function()
                     LAS.Stop()
                     return
                 end
-                AG.StealProgress = (tick() - startTime) / AG.StealDuration
-                if AG.Mode == "Priority" and target.prompt and target.prompt.Parent then
-                    if tick() - lastRefire >= 0.1 then
-                        LAS.AttemptSteal(target.prompt, {uid = target.uid, worldPosition = target.position, name = target.petName}, AG.StealDuration)
-                        lastRefire = tick()
-                    end
+
+                if not target.prompt or not target.prompt.Parent then
+                    break
                 end
+
+                AG.StealProgress = (tick() - startTime) / AG.StealDuration
+
                 if detectSteal() then
                     AG.StealCount = AG.StealCount + 1
                     AG.StealProgress = 1
                     break
                 end
-                if not target.prompt or not target.prompt.Parent then break end
+
                 task.wait(1/60)
             end
+
             AG.StealProgress = 1
             task.wait(0.1)
             AG.IsStealing = false
@@ -631,8 +631,15 @@ task.spawn(function()
                             LAS.Start()
                             AG.IsStealing = true
                             AG.CurrentPetName = target.petName
+
                             local st = tick()
-                            local lastRefire = st
+
+                            LAS.AttemptSteal(
+                                target.prompt,
+                                {uid = target.uid, worldPosition = target.position, name = target.petName},
+                                AG.StealDuration
+                            )
+
                             while tick() - st < AG.StealDuration do
                                 if inRagdollCooldown() then
                                     AG.IsStealing = false
@@ -641,20 +648,17 @@ task.spawn(function()
                                     LAS.Stop()
                                     return
                                 end
+                                if not target.prompt or not target.prompt.Parent then break end
+
                                 AG.StealProgress = (tick() - st) / AG.StealDuration
-                                if AG.Mode == "Priority" and target.prompt and target.prompt.Parent then
-                                    if tick() - lastRefire >= 0.1 then
-                                        LAS.AttemptSteal(target.prompt, {uid = target.uid, worldPosition = target.position, name = target.petName}, AG.StealDuration)
-                                        lastRefire = tick()
-                                    end
-                                end
+
                                 if detectSteal() then
                                     AG.StealCount = AG.StealCount + 1
                                     break
                                 end
-                                if not target.prompt or not target.prompt.Parent then break end
                                 task.wait(1/60)
                             end
+
                             AG.IsStealing = false
                             AG.CurrentPetName = ""
                             AG.StealProgress = 0
