@@ -21,8 +21,7 @@ local PromptMemoryCache = {}
 local InternalStealCache = {}
 local LastTargetUID = nil
 
-local STEAL_RADIUS = 60
-local STEAL_DURATION = 1.4
+local AUTO_STEAL_PROX_RADIUS = 1000
 local IsStealingInternal = false
 local StealProgressInternal = 0
 local CurrentStealTargetInternal = nil
@@ -185,7 +184,7 @@ local function shouldSteal(animalData)
     local hrp = getHRP()
     if not hrp then return false end
     local dist = (hrp.Position - animalData.worldPosition).Magnitude
-    return dist <= STEAL_RADIUS
+    return dist <= AUTO_STEAL_PROX_RADIUS
 end
 
 local function buildStealCallbacks(prompt)
@@ -224,7 +223,7 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
     task.spawn(function()
         for _, fn in ipairs(data.holdCallbacks) do task.spawn(fn) end
         local startTime = tick()
-        local duration = STEAL_DURATION
+        local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 1.0)
         while tick() - startTime < duration do
             local elapsed = tick() - startTime
             StealProgressInternal = math.clamp(elapsed / duration, 0, 1)
@@ -281,7 +280,7 @@ local function startAutoSteal(durationOverride)
             prompt = findProximityPromptForAnimal(target)
         end
         if prompt then
-            attemptSteal(prompt, target, STEAL_DURATION)
+            attemptSteal(prompt, target, durationOverride)
         end
     end)
 end
@@ -303,7 +302,7 @@ getgenv().LuminaAutoSteal = {
     IsStealing = function() return IsStealingInternal end,
     StealProgress = function() return StealProgressInternal end,
     CurrentTarget = function() return CurrentStealTargetInternal end,
-    Start = function() startAutoSteal(STEAL_DURATION) end,
+    Start = function() startAutoSteal(1.0) end,
     Stop = stopAutoSteal,
     GetNearestAnimal = getNearestAnimal,
     ShouldSteal = shouldSteal,
@@ -330,10 +329,11 @@ getgenv().AutoGrabSystem = {
     IsStealing = false,
     StealProgress = 0,
     CurrentPetName = "",
-    StealDuration = STEAL_DURATION,
+    StealDuration = 1.0,
     StealCount = 0,
     Running = true,
-    GuiScale = 50
+    GuiScale = 50,
+    MainPos = {ScaleX = 1, ScaleY = 0.5, OffsetX = -285, OffsetY = -70}
 }
 local AG = getgenv().AutoGrabSystem
 
@@ -343,7 +343,8 @@ local function SaveSettings()
             local data = {
                 Active = AG.Active,
                 Mode = AG.Mode,
-                GuiScale = AG.GuiScale
+                GuiScale = AG.GuiScale,
+                MainPos = AG.MainPos
             }
             writefile(SAVE_KEY .. ".json", HttpService:JSONEncode(data))
         end
@@ -357,6 +358,14 @@ local function LoadSettings()
             if data.Active ~= nil then AG.Active = data.Active end
             if data.Mode then AG.Mode = data.Mode end
             if data.GuiScale ~= nil then AG.GuiScale = data.GuiScale end
+            if data.MainPos and type(data.MainPos) == "table" then
+                AG.MainPos = {
+                    ScaleX = tonumber(data.MainPos.ScaleX) or 1,
+                    ScaleY = tonumber(data.MainPos.ScaleY) or 0.5,
+                    OffsetX = tonumber(data.MainPos.OffsetX) or -285,
+                    OffsetY = tonumber(data.MainPos.OffsetY) or -70
+                }
+            end
         end
     end)
 end
@@ -546,7 +555,7 @@ thread = coroutine.create(function()
             )
 
             local startTime = tick()
-            local dur = STEAL_DURATION
+            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
 
             while tick() - startTime < (dur + 0.1) do
                 if inRagdollCooldown() then
@@ -619,7 +628,7 @@ task.spawn(function()
                             AG.CurrentPetName = target.petName
 
                             local st = tick()
-                            local dur = STEAL_DURATION
+                            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
 
                             LAS.AttemptSteal(
                                 target.prompt,
@@ -675,7 +684,7 @@ GlobalUIScale.Parent = Screen
 
 local Main = Instance.new("Frame")
 Main.Size = UDim2.new(0, 270, 0, 305)
-Main.Position = UDim2.new(1, -285, 0.5, -70)
+Main.Position = UDim2.new(AG.MainPos.ScaleX, AG.MainPos.OffsetX, AG.MainPos.ScaleY, AG.MainPos.OffsetY)
 Main.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
 Main.BorderSizePixel = 0
 Main.Parent = Screen
@@ -846,9 +855,9 @@ local function MakeBtn(name, y)
     return b, upd
 end
 
-local hBtn2, hUpd = MakeBtn("Steal Highest", 50)
-local pBtn2, pUpd = MakeBtn("Steal Priority", 94)
-local nBtn2, nUpd = MakeBtn("Steal Nearest", 138)
+local hBtn, hUpd = MakeBtn("Steal Highest", 50)
+local pBtn, pUpd = MakeBtn("Steal Priority", 94)
+local nBtn, nUpd = MakeBtn("Steal Nearest", 138)
 
 local function updAll()
     hUpd(AG.Active and AG.Mode == "Highest")
@@ -856,47 +865,62 @@ local function updAll()
     nUpd(AG.Active and AG.Mode == "Nearest")
 end
 
+hBtn.MouseButton1Click:Connect(function()
+    if AG.Mode == "Highest" then
+        AG.Active = not AG.Active
+    else
+        AG.Mode = "Highest"
+        AG.Active = true
+    end
+    updAll()
+    SaveSettings()
+end)
+
+pBtn.MouseButton1Click:Connect(function()
+    if AG.Mode == "Priority" then
+        AG.Active = not AG.Active
+    else
+        AG.Mode = "Priority"
+        AG.Active = true
+    end
+    updAll()
+    SaveSettings()
+end)
+
+nBtn.MouseButton1Click:Connect(function()
+    if AG.Mode == "Nearest" then
+        AG.Active = not AG.Active
+    else
+        AG.Mode = "Nearest"
+        AG.Active = true
+    end
+    updAll()
+    SaveSettings()
+end)
+
 updAll()
 
-hBtn2.MouseButton1Click:Connect(function()
-    if AG.Active and AG.Mode == "Highest" then AG.Active = false
-    else AG.Active = true; AG.Mode = "Highest" end
-    updAll(); SaveSettings()
-end)
+local Bar = Instance.new("Frame")
+Bar.Size = UDim2.new(0.9, 0, 0, 28)
+Bar.Position = UDim2.new(0.05, 0, 0, 182)
+Bar.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+Bar.BorderSizePixel = 0
+Bar.Parent = Main
+Instance.new("UICorner", Bar).CornerRadius = UDim.new(0, 6)
 
-pBtn2.MouseButton1Click:Connect(function()
-    if AG.Active and AG.Mode == "Priority" then AG.Active = false
-    else AG.Active = true; AG.Mode = "Priority" end
-    updAll(); SaveSettings()
-end)
-
-nBtn2.MouseButton1Click:Connect(function()
-    if AG.Active and AG.Mode == "Nearest" then AG.Active = false
-    else AG.Active = true; AG.Mode = "Nearest" end
-    updAll(); SaveSettings()
-end)
-
-local Bar2 = Instance.new("Frame")
-Bar2.Size = UDim2.new(0.9, 0, 0, 28)
-Bar2.Position = UDim2.new(0.05, 0, 0, 182)
-Bar2.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-Bar2.BorderSizePixel = 0
-Bar2.Parent = Main
-Instance.new("UICorner", Bar2).CornerRadius = UDim.new(0, 6)
-
-local Fill2 = Instance.new("Frame")
-Fill2.Size = UDim2.new(0, 0, 1, 0)
-Fill2.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
-Fill2.BorderSizePixel = 0
-Fill2.Parent = Bar2
-Instance.new("UICorner", Fill2).CornerRadius = UDim.new(0, 6)
+local Fill = Instance.new("Frame")
+Fill.Size = UDim2.new(0, 0, 1, 0)
+Fill.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+Fill.BorderSizePixel = 0
+Fill.Parent = Bar
+Instance.new("UICorner", Fill).CornerRadius = UDim.new(0, 6)
 
 local Dot = Instance.new("Frame")
 Dot.Size = UDim2.new(0, 6, 0, 6)
 Dot.Position = UDim2.new(0, 8, 0.5, -3)
 Dot.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
 Dot.BorderSizePixel = 0
-Dot.Parent = Bar2
+Dot.Parent = Bar
 Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
 
 local Status = Instance.new("TextLabel")
@@ -908,7 +932,7 @@ Status.TextColor3 = Color3.fromRGB(100, 100, 110)
 Status.Font = Enum.Font.Gotham
 Status.TextSize = 10
 Status.TextXAlignment = Enum.TextXAlignment.Left
-Status.Parent = Bar2
+Status.Parent = Bar
 
 local PetName = Instance.new("TextLabel")
 PetName.Size = UDim2.new(0, 90, 1, 0)
@@ -920,7 +944,7 @@ PetName.Font = Enum.Font.GothamBold
 PetName.TextSize = 9
 PetName.TextXAlignment = Enum.TextXAlignment.Left
 PetName.TextTruncate = Enum.TextTruncate.AtEnd
-PetName.Parent = Bar2
+PetName.Parent = Bar
 
 local Pct = Instance.new("TextLabel")
 Pct.Size = UDim2.new(0, 40, 1, 0)
@@ -931,7 +955,7 @@ Pct.TextColor3 = Color3.fromRGB(160, 160, 170)
 Pct.Font = Enum.Font.GothamBold
 Pct.TextSize = 10
 Pct.TextXAlignment = Enum.TextXAlignment.Right
-Pct.Parent = Bar2
+Pct.Parent = Bar
 
 local SettingsDivider = Instance.new("Frame", Main)
 SettingsDivider.Size             = UDim2.new(0.9, 0, 0, 1)
@@ -1106,8 +1130,8 @@ task.spawn(function()
         Count.Text = tostring(AG.StealCount)
         if inRagdollCooldown() then
             local remaining = math.max(0, ragdollEndTime - tick())
-            Fill2.Size = UDim2.new(0, 0, 1, 0)
-            Fill2.BackgroundColor3 = Color3.fromRGB(220, 200, 60)
+            Fill.Size = UDim2.new(0, 0, 1, 0)
+            Fill.BackgroundColor3 = Color3.fromRGB(220, 200, 60)
             Pct.Text = ""
             Status.Text = string.format("Ragdolled Wait %.1fs", remaining)
             Status.TextColor3 = Color3.fromRGB(255, 225, 80)
@@ -1115,21 +1139,21 @@ task.spawn(function()
             PetName.Text = ""
         elseif AG.IsStealing then
             local p = AG.StealProgress
-            Fill2.Size = UDim2.new(math.clamp(p, 0, 1), 0, 1, 0)
-            Fill2.BackgroundColor3 = p >= 0.99 and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(180, 180, 190)
+            Fill.Size = UDim2.new(math.clamp(p, 0, 1), 0, 1, 0)
+            Fill.BackgroundColor3 = p >= 0.99 and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(180, 180, 190)
             Pct.Text = math.floor(p * 100) .. "%"
             Status.Text = p >= 0.99 and "Got!" or "Grab"
             Status.TextColor3 = p >= 0.99 and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(180, 180, 190)
             Dot.BackgroundColor3 = Status.TextColor3
             PetName.Text = AG.CurrentPetName
         else
-            local currentSize = Fill2.Size.X.Scale
+            local currentSize = Fill.Size.X.Scale
             if currentSize > 0.01 then
-                Fill2.Size = UDim2.new(math.max(0, currentSize - 0.05), 0, 1, 0)
+                Fill.Size = UDim2.new(math.max(0, currentSize - 0.05), 0, 1, 0)
             else
-                Fill2.Size = UDim2.new(0, 0, 1, 0)
+                Fill.Size = UDim2.new(0, 0, 1, 0)
             end
-            Fill2.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+            Fill.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
             Pct.Text = ""
             if AG.Active then
                 Status.Text = "Scan"
@@ -1160,6 +1184,8 @@ UserInputService.InputChanged:Connect(function(i)
     if drag and not isInteractingWithSlider and i.UserInputType == Enum.UserInputType.MouseMovement then
         local d = i.Position - ds
         Main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+        AG.MainPos = {ScaleX = Main.Position.X.Scale, ScaleY = Main.Position.Y.Scale, OffsetX = Main.Position.X.Offset, OffsetY = Main.Position.Y.Offset}
+        SaveSettings()
     end
 end)
 UserInputService.InputEnded:Connect(function(i)
@@ -1176,6 +1202,10 @@ UserInputService.InputBegan:Connect(function(input, gpe)
         end
     end
 end)
+
+if AG.Active then
+    updAll()
+end
 
 function AG.Disable()
     AG.Active = false
