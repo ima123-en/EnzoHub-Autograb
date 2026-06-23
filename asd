@@ -231,9 +231,7 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
             if not prompt or not prompt.Parent then break end
         end
         StealProgressInternal = 1
-        task.wait(0.05)
         for _, fn in ipairs(data.triggerCallbacks) do task.spawn(fn) end
-        task.wait(0.2)
         data.ready = true
         IsStealingInternal = false
         StealProgressInternal = 0
@@ -324,7 +322,7 @@ if getgenv().AutoGrabSystem then
 end
 
 getgenv().AutoGrabSystem = {
-    Active = false,
+    Active = true,
     Mode = "Highest",
     IsStealing = false,
     StealProgress = 0,
@@ -369,7 +367,6 @@ local function LoadSettings()
 end
 
 LoadSettings()
-AG.Active = true
 
 local Database = {}
 pcall(function()
@@ -673,6 +670,7 @@ local gui = LocalPlayer:WaitForChild("PlayerGui")
 local Screen = Instance.new("ScreenGui")
 Screen.Name = "AutoGrabPanel"
 Screen.ResetOnSpawn = false
+Screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 Screen.Parent = gui
 AG.ScreenGui = Screen
 
@@ -1197,14 +1195,9 @@ UserInputService.InputBegan:Connect(function(input, gpe)
         if input.KeyCode == Enum.KeyCode.RightControl then
             Main.Visible = not Main.Visible
             updateOpenButtonVisibility()
-            return
         end
     end
 end)
-
-if AG.Active then
-    updAll()
-end
 
 function AG.Disable()
     AG.Active = false
