@@ -221,29 +221,20 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
     StealProgressInternal = 0
     CurrentStealTargetInternal = animalData
     task.spawn(function()
-        if #data.holdCallbacks > 0 then
-            for _, fn in ipairs(data.holdCallbacks) do
-                task.spawn(fn)
-            end
-        end
+        for _, fn in ipairs(data.holdCallbacks) do task.spawn(fn) end
         local startTime = tick()
-        local duration = durationOverride or 0.9
-        if prompt and prompt.HoldDuration then
-            duration = prompt.HoldDuration
-        end
+        local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 0.9)
         while tick() - startTime < duration do
-            StealProgressInternal = (tick() - startTime) / duration
-            task.wait(0.05)
+            local elapsed = tick() - startTime
+            StealProgressInternal = math.clamp(elapsed / duration, 0, 1)
+            task.wait()
+            if not prompt or not prompt.Parent then break end
         end
         StealProgressInternal = 1
-        if #data.triggerCallbacks > 0 then
-            for _, fn in ipairs(data.triggerCallbacks) do
-                task.spawn(fn)
-            end
-        end
-        task.wait(0.1)
+        task.wait(0.05)
+        for _, fn in ipairs(data.triggerCallbacks) do task.spawn(fn) end
+        task.wait(0.2)
         data.ready = true
-        task.wait(0.3)
         IsStealingInternal = false
         StealProgressInternal = 0
         CurrentStealTargetInternal = nil
@@ -277,21 +268,13 @@ local function getNearestAnimal()
 end
 
 local function startAutoSteal(durationOverride)
-    if stealConnection then
-        stealConnection:Disconnect()
-    end
+    if stealConnection then stealConnection:Disconnect() end
     autoStealEnabled = true
     stealConnection = RunService.Heartbeat:Connect(function()
-        if not autoStealEnabled or IsStealingInternal then
-            return
-        end
+        if not autoStealEnabled or IsStealingInternal then return end
         local target = getNearestAnimal()
-        if not target or not shouldSteal(target) then
-            return
-        end
-        if LastTargetUID ~= target.uid then
-            LastTargetUID = target.uid
-        end
+        if not target or not shouldSteal(target) then return end
+        if LastTargetUID ~= target.uid then LastTargetUID = target.uid end
         local prompt = PromptMemoryCache[target.uid]
         if not prompt or not prompt.Parent then
             prompt = findProximityPromptForAnimal(target)
@@ -304,10 +287,7 @@ end
 
 local function stopAutoSteal()
     autoStealEnabled = false
-    if stealConnection then
-        stealConnection:Disconnect()
-        stealConnection = nil
-    end
+    if stealConnection then stealConnection:Disconnect() stealConnection = nil end
     IsStealingInternal = false
     StealProgressInternal = 0
     CurrentStealTargetInternal = nil
@@ -565,7 +545,9 @@ thread = coroutine.create(function()
             )
 
             local startTime = tick()
-            while tick() - startTime < AG.StealDuration do
+            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
+
+            while tick() - startTime < (dur + 0.1) do
                 if inRagdollCooldown() then
                     AG.IsStealing = false
                     AG.CurrentPetName = ""
@@ -578,7 +560,7 @@ thread = coroutine.create(function()
                     break
                 end
 
-                AG.StealProgress = (tick() - startTime) / AG.StealDuration
+                AG.StealProgress = math.clamp((tick() - startTime) / dur, 0, 1)
 
                 if detectSteal() then
                     AG.StealCount = AG.StealCount + 1
@@ -589,8 +571,11 @@ thread = coroutine.create(function()
                 task.wait(1/60)
             end
 
-            AG.StealProgress = 1
-            task.wait(0.1)
+            if AG.StealProgress < 1 then
+                AG.StealProgress = 1
+                task.wait(0.1)
+            end
+
             AG.IsStealing = false
             AG.CurrentPetName = ""
             AG.StealProgress = 0
@@ -633,6 +618,7 @@ task.spawn(function()
                             AG.CurrentPetName = target.petName
 
                             local st = tick()
+                            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
 
                             LAS.AttemptSteal(
                                 target.prompt,
@@ -640,7 +626,7 @@ task.spawn(function()
                                 AG.StealDuration
                             )
 
-                            while tick() - st < AG.StealDuration do
+                            while tick() - st < (dur + 0.1) do
                                 if inRagdollCooldown() then
                                     AG.IsStealing = false
                                     AG.CurrentPetName = ""
@@ -650,10 +636,11 @@ task.spawn(function()
                                 end
                                 if not target.prompt or not target.prompt.Parent then break end
 
-                                AG.StealProgress = (tick() - st) / AG.StealDuration
+                                AG.StealProgress = math.clamp((tick() - st) / dur, 0, 1)
 
                                 if detectSteal() then
                                     AG.StealCount = AG.StealCount + 1
+                                    AG.StealProgress = 1
                                     break
                                 end
                                 task.wait(1/60)
