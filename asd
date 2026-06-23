@@ -341,7 +341,6 @@ local function SaveSettings()
     pcall(function()
         if writefile then
             local data = {
-                Active = AG.Active,
                 Mode = AG.Mode,
                 GuiScale = AG.GuiScale,
                 MainPos = AG.MainPos
@@ -355,7 +354,6 @@ local function LoadSettings()
     pcall(function()
         if readfile and isfile and isfile(SAVE_KEY .. ".json") then
             local data = HttpService:JSONDecode(readfile(SAVE_KEY .. ".json"))
-            if data.Active ~= nil then AG.Active = data.Active end
             if data.Mode then AG.Mode = data.Mode end
             if data.GuiScale ~= nil then AG.GuiScale = data.GuiScale end
             if data.MainPos and type(data.MainPos) == "table" then
@@ -371,6 +369,7 @@ local function LoadSettings()
 end
 
 LoadSettings()
+AG.Active = true
 
 local Database = {}
 pcall(function()
