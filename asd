@@ -223,7 +223,7 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
     task.spawn(function()
         for _, fn in ipairs(data.holdCallbacks) do task.spawn(fn) end
         local startTime = tick()
-        local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 0.9)
+        local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 1.0)
         while tick() - startTime < duration do
             local elapsed = tick() - startTime
             StealProgressInternal = math.clamp(elapsed / duration, 0, 1)
@@ -302,7 +302,7 @@ getgenv().LuminaAutoSteal = {
     IsStealing = function() return IsStealingInternal end,
     StealProgress = function() return StealProgressInternal end,
     CurrentTarget = function() return CurrentStealTargetInternal end,
-    Start = function() startAutoSteal(0.9) end,
+    Start = function() startAutoSteal(1.0) end,
     Stop = stopAutoSteal,
     GetNearestAnimal = getNearestAnimal,
     ShouldSteal = shouldSteal,
@@ -329,7 +329,7 @@ getgenv().AutoGrabSystem = {
     IsStealing = false,
     StealProgress = 0,
     CurrentPetName = "",
-    StealDuration = 0.9,
+    StealDuration = 1.0,
     StealCount = 0,
     Running = true,
     GuiScale = 50
