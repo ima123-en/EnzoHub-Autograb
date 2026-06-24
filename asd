@@ -22,6 +22,7 @@ local InternalStealCache = {}
 local LastTargetUID = nil
 
 local AUTO_STEAL_PROX_RADIUS = 1000
+local PRIORITY_STEAL_RADIUS = 60
 local IsStealingInternal = false
 local StealProgressInternal = 0
 local CurrentStealTargetInternal = nil
@@ -380,15 +381,28 @@ pcall(function()
 end)
 
 local function findPromptInPodium(podium)
+    if not podium then return nil, nil end
+    local base = podium:FindFirstChild("Base")
+    local spawn = base and base:FindFirstChild("Spawn")
+    local attach = spawn and spawn:FindFirstChild("PromptAttachment")
+    if attach then
+        local p = attach:FindFirstChildOfClass("ProximityPrompt")
+        if p and p.Enabled then
+            return p, attach.WorldPosition
+        end
+    end
+    local podiumCenter = podium:GetPivot().Position
     for _, d in pairs(podium:GetDescendants()) do
         if d:IsA("ProximityPrompt") and d.Enabled then
-            local pos
-            if d.Parent:IsA("Attachment") and d.Parent.Parent:IsA("BasePart") then
-                pos = d.Parent.Parent.Position
+            local pos = nil
+            if d.Parent:IsA("Attachment") then
+                pos = d.Parent.WorldPosition
             elseif d.Parent:IsA("BasePart") then
                 pos = d.Parent.Position
             end
-            if pos then return d, pos end
+            if pos and (pos - podiumCenter).Magnitude < 3 then
+                return d, pos
+            end
         end
     end
     return nil, nil
@@ -408,10 +422,20 @@ local function getPriorityTarget()
     local podium = podiums:FindFirstChild(tostring(d.slot))
     if not podium then return nil end
     local prompt, pos = findPromptInPodium(podium)
-    if prompt then
-        return { prompt = prompt, position = pos, petName = d.name or "?", petValue = d.genValue or 0, uid = d.plot .. "_" .. tostring(d.slot) }
+    if not prompt or not pos then return nil end
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local dist = (hrp.Position - pos).Magnitude
+    if dist > PRIORITY_STEAL_RADIUS then
+        return nil
     end
-    return nil
+    return {
+        prompt = prompt,
+        position = pos,
+        petName = d.name or "?",
+        petValue = d.genValue or 0,
+        uid = d.plot .. "_" .. tostring(d.slot)
+    }
 end
 
 local function getTarget()
