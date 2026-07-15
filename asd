@@ -22,7 +22,7 @@ local InternalStealCache = {}
 local LastTargetUID = nil
 
 local AUTO_STEAL_PROX_RADIUS = 1000
-local PRIORITY_STEAL_RADIUS = 60
+local PRIORITY_STEAL_RADIUS = 53
 local IsStealingInternal = false
 local StealProgressInternal = 0
 local CurrentStealTargetInternal = nil
