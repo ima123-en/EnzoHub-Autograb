@@ -21,7 +21,7 @@ local PromptMemoryCache = {}
 local InternalStealCache = {}
 local LastTargetUID = nil
 
-local AUTO_STEAL_PROX_RADIUS = 1000
+local AUTO_STEAL_PROX_RADIUS = 50
 local PRIORITY_STEAL_RADIUS = 50
 local IsStealingInternal = false
 local StealProgressInternal = 0
