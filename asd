@@ -21,8 +21,8 @@ local PromptMemoryCache = {}
 local InternalStealCache = {}
 local LastTargetUID = nil
 
-local AUTO_STEAL_PROX_RADIUS = 50
-local PRIORITY_STEAL_RADIUS = 50
+local AUTO_STEAL_PROX_RADIUS = 1000
+local PRIORITY_STEAL_RADIUS = 60
 local IsStealingInternal = false
 local StealProgressInternal = 0
 local CurrentStealTargetInternal = nil
@@ -155,7 +155,7 @@ local function findProximityPromptForAnimal(animalData)
     if not animalData then return nil end
     local cachedPrompt = PromptMemoryCache[animalData.uid]
     if cachedPrompt and cachedPrompt.Parent then
-        cachedPrompt.Enabled = true -- Bypass, falls deaktiviert
+        cachedPrompt.Enabled = true -- Bypass: Aktiviert die Prompt falls deaktiviert
         return cachedPrompt
     end
     local plots = Workspace:FindFirstChild("Plots")
@@ -174,7 +174,7 @@ local function findProximityPromptForAnimal(animalData)
     if not attach then return nil end
     for _, p in ipairs(attach:GetChildren()) do
         if p:IsA("ProximityPrompt") then
-            p.Enabled = true -- Force Enable Bypass
+            p.Enabled = true -- Bypass
             PromptMemoryCache[animalData.uid] = p
             return p
         end
@@ -224,7 +224,7 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
     StealProgressInternal = 0
     CurrentStealTargetInternal = animalData
     task.spawn(function()
-        if prompt then prompt.Enabled = true end -- Force Enable
+        if prompt then prompt.Enabled = true end -- Bypass
         for _, fn in ipairs(data.holdCallbacks) do task.spawn(fn) end
         local startTime = tick()
         local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 1.0)
@@ -233,7 +233,7 @@ local function executeInternalStealAsync(prompt, animalData, durationOverride)
             StealProgressInternal = math.clamp(elapsed / duration, 0, 1)
             task.wait()
             if not prompt or not prompt.Parent then break end
-            if not prompt.Enabled then prompt.Enabled = true end -- Anti-Interruption Bypass
+            if not prompt.Enabled then prompt.Enabled = true end -- Hält Prompt aktiv beim Diebstahl
         end
         StealProgressInternal = 1
         for _, fn in ipairs(data.triggerCallbacks) do task.spawn(fn) end
@@ -247,7 +247,7 @@ end
 
 local function attemptSteal(prompt, animalData, durationOverride)
     if not prompt or not prompt.Parent then return false end
-    prompt.Enabled = true -- Sicherstellen, dass sie an ist
+    prompt.Enabled = true -- Aktivieren
     buildStealCallbacks(prompt)
     if not InternalStealCache[prompt] then
         return false
@@ -393,7 +393,7 @@ local function findPromptInPodium(podium)
     if attach then
         local p = attach:FindFirstChildOfClass("ProximityPrompt")
         if p then
-            p.Enabled = true -- Bypass: Aktiviert die Prompt auf unserem Client, falls deaktiviert!
+            p.Enabled = true -- Bypass: Aktiviert die Prompt trotz Fremddiebstahl
             return p, attach.WorldPosition
         end
     end
@@ -460,7 +460,7 @@ local function getPriorityTarget()
     if not hrp then return nil end
     local dist = (hrp.Position - pos).Magnitude
     if dist > PRIORITY_STEAL_RADIUS then
-        return nil
+        return nil -- Keine Interaktion wenn weiter als 60 Studs weg!
     end
     return {
         prompt = prompt,
@@ -473,27 +473,7 @@ end
 
 local function getTarget()
     if AG.Mode == "Priority" then
-        local prio = getPriorityTarget()
-        if prio then
-            return prio
-        else
-            -- FALLBACK: Wenn das Priority Tier gerade gestohlen wird/weg ist, 
-            -- klauen wir stattdessen das nächste oder beste Tier, damit wir nicht dumm rumstehen!
-            local fallback = getHighestAnimal() or getNearestAnimal()
-            if fallback then
-                local LAS = getgenv().LuminaAutoSteal
-                local prompt = LAS and LAS.FindPrompt(fallback)
-                if prompt then
-                    return {
-                        prompt = prompt,
-                        position = fallback.worldPosition,
-                        petName = fallback.name or "?",
-                        petValue = Database[fallback.name] or 0,
-                        uid = fallback.uid
-                    }
-                end
-            end
-        end
+        return getPriorityTarget() -- AUSSCHLIEßLICH PRIORITY! Kein Fallback mehr auf andere Tiere!
     elseif AG.Mode == "Highest" then
         local highest = getHighestAnimal()
         if highest then
