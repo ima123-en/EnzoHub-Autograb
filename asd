@@ -10,156 +10,192 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
-local AnimalsData = {}
-local okA, resA = pcall(function()
-    return require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
-end)
-if okA then AnimalsData = resA end
+-- =============================================================================
+-- KAWAI CORE CONFIGURATION & STATE ENGINE
+-- =============================================================================
+local CONFIG = {
+    HOLD_MIN = 1.3,
+    HOLD_MAX = 2.6,
+    ENTRY_DELAY = 0.3,
+    COOLDOWN = 0.05,
+    STEAL_RANGE = 10,
+    PRIME_RANGE = 80,
+}
 
+local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Datas = ReplicatedStorage:WaitForChild("Datas")
+
+local AnimalsData = require(Datas:WaitForChild("Animals"))
+local plots = Workspace:WaitForChild("Plots")
+
+-- Replikations-Kanäle initialisieren
+local syncRemotes = (function()
+    local folder = Packages:WaitForChild("Synchronizer")
+    return {
+        channelFolder = folder:WaitForChild("Channel"),
+        routeRemote = folder:WaitForChild("CommunicationRoute"),
+        requestData = folder:FindFirstChild("RequestData"),
+    }
+end)()
+
+local plotAnimalSync = {
+    caches = {},
+    connections = {},
+}
+
+local function splitSyncPath(path)
+    if typeof(path) == "table" then return path end
+    local out = {}
+    for part in string.gmatch(tostring(path), "[^%.]+") do
+        table.insert(out, tonumber(part) or part)
+    end
+    return out
+end
+
+local function resolveSyncPath(path, root)
+    local current = root
+    local parent = nil
+    local key = nil
+    for _, part in ipairs(splitSyncPath(path)) do
+        parent = current
+        key = part
+        current = current and current[part] or nil
+    end
+    return current, parent, key
+end
+
+local function applyPlotSyncDiff(channelName, packet)
+    local cache = plotAnimalSync.caches[channelName]
+    if typeof(cache) ~= "table" then return end
+    local path, action, a, b = packet[1], packet[2], packet[3], packet[4]
+    local current, parent, key = resolveSyncPath(path, cache)
+    if action == "Changed" then
+        if parent ~= nil then parent[key] = a end
+    elseif action == "ArrayInsert" then
+        if current ~= nil then table.insert(current, b, a) end
+    elseif action == "ArrayRemoved" then
+        if current ~= nil then table.remove(current, b) end
+    elseif action == "DictionaryInsert" then
+        if current ~= nil then current[b] = a end
+    elseif action == "DictionaryRemoved" then
+        if current ~= nil then current[b] = nil end
+    end
+end
+
+local function attachPlotChannel(remote)
+    if plotAnimalSync.connections[remote] then return end
+    local channelName = tostring(remote.Name)
+    if not plots:FindFirstChild(channelName) then return end
+    if syncRemotes.requestData and plotAnimalSync.caches[channelName] == nil then
+        local ok, data = pcall(function()
+            return syncRemotes.requestData:InvokeServer(channelName)
+        end)
+        if ok and typeof(data) == "table" then
+            plotAnimalSync.caches[channelName] = data
+        else
+            plotAnimalSync.caches[channelName] = {}
+        end
+    elseif plotAnimalSync.caches[channelName] == nil then
+        plotAnimalSync.caches[channelName] = {}
+    end
+    plotAnimalSync.connections[remote] = remote.OnClientEvent:Connect(function(queue)
+        for _, packet in ipairs(queue) do
+            applyPlotSyncDiff(channelName, packet)
+        end
+    end)
+end
+
+local function detachPlotChannel(channelName)
+    for remote, conn in pairs(plotAnimalSync.connections) do
+        if tostring(remote.Name) == tostring(channelName) then
+            conn:Disconnect()
+            plotAnimalSync.connections[remote] = nil
+            plotAnimalSync.caches[tostring(channelName)] = nil
+            break
+        end
+    end
+end
+
+for _, child in ipairs(syncRemotes.channelFolder:GetChildren()) do
+    if child:IsA("RemoteEvent") then attachPlotChannel(child) end
+end
+
+syncRemotes.channelFolder.ChildAdded:Connect(function(child)
+    if child:IsA("RemoteEvent") then attachPlotChannel(child) end
+end)
+
+syncRemotes.routeRemote.OnClientEvent:Connect(function(actions)
+    for _, action in ipairs(actions) do
+        local kind, channelName = action[1], tostring(action[2])
+        if not plots:FindFirstChild(channelName) then continue end
+        if kind == "ListenerAdded" then
+            local remote = syncRemotes.channelFolder:FindFirstChild(channelName)
+            if remote and remote:IsA("RemoteEvent") then attachPlotChannel(remote) end
+        elseif kind == "ListenerRemoved" then
+            detachPlotChannel(channelName)
+        end
+    end
+end)
+
+local function getPlotChannelData(plotName)
+    return plotAnimalSync.caches[plotName]
+end
+
+-- Cache-Tabellen & States
 local allAnimalsCache = {}
 local PromptMemoryCache = {}
 local InternalStealCache = {}
-local LastTargetUID = nil
 
-local AUTO_STEAL_PROX_RADIUS = 1000
-local PRIORITY_STEAL_RADIUS = 60
-local IsStealingInternal = false
-local StealProgressInternal = 0
-local CurrentStealTargetInternal = nil
-
-local autoStealEnabled = false
-local stealConnection = nil
+local StealState = {
+    active = false,
+    startTime = 0,
+    phase = "idle",
+    label = "",
+}
 
 local function getHRP()
     local c = LocalPlayer.Character
     return c and (c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("UpperTorso"))
 end
 
-local function isMyBase(plotName)
-    local plots = Workspace:FindFirstChild("Plots")
-    if not plots then return false end
-    local plot = plots:FindFirstChild(plotName)
-    if not plot then return false end
+local function getPlotOwner(plot)
     local sign = plot:FindFirstChild("PlotSign")
-    if sign then
-        local yourBase = sign:FindFirstChild("YourBase")
-        if yourBase and yourBase:IsA("BillboardGui") then
-            return yourBase.Enabled == true
-        end
-    end
-    return false
+    local frame = sign and sign:FindFirstChild("SurfaceGui") and sign.SurfaceGui:FindFirstChild("Frame")
+    local label = frame and frame:FindFirstChild("TextLabel")
+    if not label or label.Text == "Empty Base" then return nil end
+    return label.Text:gsub("'s [Bb]ase$", ""):gsub("%s+$", "")
 end
 
-local function scanSinglePlot(plot)
-    if not plot or not plot:IsA("Model") then return end
-    if isMyBase(plot.Name) then return end
+local function isMyBaseAnimal(animalData)
+    if not animalData or not animalData.plot then return false end
+    local plot = plots:FindFirstChild(animalData.plot)
+    if not plot then return false end
+    return getPlotOwner(plot) == LocalPlayer.DisplayName
+end
+
+local function getAnimalPosition(animalData)
+    local plot = plots:FindFirstChild(animalData.plot)
+    if not plot then return nil end
     local podiums = plot:FindFirstChild("AnimalPodiums")
-    if not podiums then return end
-    for _, podium in ipairs(podiums:GetChildren()) do
-        if podium:IsA("Model") and podium:FindFirstChild("Base") then
-            local animalName = "Unknown"
-            local spawn = podium.Base:FindFirstChild("Spawn")
-            if spawn then
-                for _, child in ipairs(spawn:GetChildren()) do
-                    if child:IsA("Model") and child.Name ~= "PromptAttachment" then
-                        animalName = child.Name
-                        local animalInfo = AnimalsData[animalName]
-                        if animalInfo and animalInfo.DisplayName then
-                            animalName = animalInfo.DisplayName
-                        end
-                        break
-                    end
-                end
-            end
-            local uid = plot.Name .. "_" .. podium.Name
-            for i = #allAnimalsCache, 1, -1 do
-                if allAnimalsCache[i].uid == uid then
-                    table.remove(allAnimalsCache, i)
-                end
-            end
-            table.insert(allAnimalsCache, {
-                name = animalName,
-                plot = plot.Name,
-                slot = podium.Name,
-                worldPosition = podium:GetPivot().Position,
-                uid = uid,
-            })
-        end
-    end
+    if not podiums then return nil end
+    local podium = podiums:FindFirstChild(animalData.slot)
+    if not podium then return nil end
+    return podium:GetPivot().Position
 end
 
-local function initializeScanner()
-    task.wait(2)
-    local plots = Workspace:FindFirstChild("Plots")
-    if not plots then return end
-    for _, plot in ipairs(plots:GetChildren()) do
-        if plot:IsA("Model") then
-            scanSinglePlot(plot)
-        end
-    end
-    plots.ChildAdded:Connect(function(plot)
-        if plot:IsA("Model") then
-            task.wait(0.5)
-            scanSinglePlot(plot)
-        end
-    end)
-    plots.ChildRemoved:Connect(function(plot)
-        for i = #allAnimalsCache, 1, -1 do
-            if allAnimalsCache[i].plot == plot.Name then
-                table.remove(allAnimalsCache, i)
-            end
-        end
-    end)
-    local function watchPlot(plot)
-        if not plot or not plot:IsA("Model") then return end
-        local podiums = plot:WaitForChild("AnimalPodiums", 5)
-        if not podiums then return end
-        podiums.ChildAdded:Connect(function(podium)
-            task.wait(0.3)
-            scanSinglePlot(plot)
-        end)
-        podiums.ChildRemoved:Connect(function(podium)
-            local uid = plot.Name .. "_" .. podium.Name
-            for i = #allAnimalsCache, 1, -1 do
-                if allAnimalsCache[i].uid == uid then
-                    table.remove(allAnimalsCache, i)
-                    PromptMemoryCache[uid] = nil
-                end
-            end
-        end)
-        for _, podium in ipairs(podiums:GetChildren()) do
-            if podium:IsA("Model") and podium:FindFirstChild("Base") then
-                local spawnFolder = podium.Base:FindFirstChild("Spawn")
-                if spawnFolder then
-                    spawnFolder.ChildAdded:Connect(function()
-                        task.wait(0.1)
-                        scanSinglePlot(plot)
-                    end)
-                    spawnFolder.ChildRemoved:Connect(function()
-                        task.wait(0.1)
-                        scanSinglePlot(plot)
-                    end)
-                end
-            end
-        end
-    end
-    for _, plot in ipairs(plots:GetChildren()) do
-        task.spawn(watchPlot, plot)
-    end
-    plots.ChildAdded:Connect(function(plot)
-        task.spawn(watchPlot, plot)
-    end)
+local function distToAnimal(animalData)
+    local hrp = getHRP()
+    if not hrp then return math.huge end
+    local pos = getAnimalPosition(animalData)
+    if not pos then return math.huge end
+    return (hrp.Position - pos).Magnitude
 end
 
 local function findProximityPromptForAnimal(animalData)
     if not animalData then return nil end
-    local cachedPrompt = PromptMemoryCache[animalData.uid]
-    if cachedPrompt and cachedPrompt.Parent then
-        cachedPrompt.Enabled = true -- Bypass: Aktiviert die Prompt falls deaktiviert
-        return cachedPrompt
-    end
-    local plots = Workspace:FindFirstChild("Plots")
-    if not plots then return nil end
+    local cached = PromptMemoryCache[animalData.uid]
+    if cached and cached.Parent then return cached end
+
     local plot = plots:FindFirstChild(animalData.plot)
     if not plot then return nil end
     local podiums = plot:FindFirstChild("AnimalPodiums")
@@ -172,9 +208,10 @@ local function findProximityPromptForAnimal(animalData)
     if not spawn then return nil end
     local attach = spawn:FindFirstChild("PromptAttachment")
     if not attach then return nil end
+
     for _, p in ipairs(attach:GetChildren()) do
         if p:IsA("ProximityPrompt") then
-            p.Enabled = true -- Bypass
+            p.Enabled = true
             PromptMemoryCache[animalData.uid] = p
             return p
         end
@@ -182,19 +219,10 @@ local function findProximityPromptForAnimal(animalData)
     return nil
 end
 
-local function shouldSteal(animalData)
-    if not animalData or not animalData.worldPosition then return false end
-    local hrp = getHRP()
-    if not hrp then return false end
-    local dist = (hrp.Position - animalData.worldPosition).Magnitude
-    return dist <= AUTO_STEAL_PROX_RADIUS
-end
-
 local function buildStealCallbacks(prompt)
-    if InternalStealCache[prompt] then
-        return
-    end
-    local data = {holdCallbacks = {}, triggerCallbacks = {}, ready = true}
+    if InternalStealCache[prompt] then return end
+    local data = { holdCallbacks = {}, triggerCallbacks = {}, ready = true }
+
     local ok1, conns1 = pcall(getconnections, prompt.PromptButtonHoldBegan)
     if ok1 and type(conns1) == "table" then
         for _, conn in ipairs(conns1) do
@@ -203,6 +231,7 @@ local function buildStealCallbacks(prompt)
             end
         end
     end
+
     local ok2, conns2 = pcall(getconnections, prompt.Triggered)
     if ok2 and type(conns2) == "table" then
         for _, conn in ipairs(conns2) do
@@ -211,48 +240,169 @@ local function buildStealCallbacks(prompt)
             end
         end
     end
+
     if (#data.holdCallbacks > 0) or (#data.triggerCallbacks > 0) then
         InternalStealCache[prompt] = data
     end
 end
 
-local function executeInternalStealAsync(prompt, animalData, durationOverride)
+-- =============================================================================
+-- KAWAI HIGH-PRECISION BYPASS DIEBSTAHL ENGINE
+-- =============================================================================
+local function executeStealAsync(prompt, animalData)
     local data = InternalStealCache[prompt]
     if not data or not data.ready then return false end
     data.ready = false
-    IsStealingInternal = true
-    StealProgressInternal = 0
-    CurrentStealTargetInternal = animalData
+
+    local label = animalData.name or "Animal"
+    StealState.active = true
+    StealState.startTime = tick()
+    StealState.phase = "holding"
+    StealState.label = label
+
     task.spawn(function()
-        if prompt then prompt.Enabled = true end -- Bypass
         for _, fn in ipairs(data.holdCallbacks) do task.spawn(fn) end
-        local startTime = tick()
-        local duration = (prompt.HoldDuration and prompt.HoldDuration > 0) and prompt.HoldDuration or (durationOverride or 1.0)
-        while tick() - startTime < duration do
-            local elapsed = tick() - startTime
-            StealProgressInternal = math.clamp(elapsed / duration, 0, 1)
+
+        task.wait(CONFIG.HOLD_MIN)
+
+        StealState.phase = "waitingRange"
+
+        local alreadyInRange = distToAnimal(animalData) <= CONFIG.STEAL_RANGE
+        local fired = false
+        while true do
+            local elapsed = tick() - StealState.startTime
+            if elapsed > CONFIG.HOLD_MAX then break end
+            if not prompt.Parent then break end
+            if distToAnimal(animalData) <= CONFIG.STEAL_RANGE then
+                if not alreadyInRange then task.wait(CONFIG.ENTRY_DELAY) end
+                for _, fn in ipairs(data.triggerCallbacks) do task.spawn(fn) end
+                fired = true
+                break
+            end
             task.wait()
-            if not prompt or not prompt.Parent then break end
-            if not prompt.Enabled then prompt.Enabled = true end -- Hält Prompt aktiv beim Diebstahl
         end
-        StealProgressInternal = 1
-        for _, fn in ipairs(data.triggerCallbacks) do task.spawn(fn) end
+
+        StealState.active = false
+        StealState.phase = "idle"
+
+        task.wait(CONFIG.COOLDOWN)
         data.ready = true
-        IsStealingInternal = false
-        StealProgressInternal = 0
-        CurrentStealTargetInternal = nil
     end)
     return true
 end
 
-local function attemptSteal(prompt, animalData, durationOverride)
+local function attemptSteal(prompt, animalData)
     if not prompt or not prompt.Parent then return false end
-    prompt.Enabled = true -- Aktivieren
     buildStealCallbacks(prompt)
-    if not InternalStealCache[prompt] then
-        return false
+    if not InternalStealCache[prompt] then return false end
+    return executeStealAsync(prompt, animalData)
+end
+
+local function scanAllPlots()
+    local newCache = {}
+    for _, plot in ipairs(plots:GetChildren()) do
+        local cache = getPlotChannelData(plot.Name)
+        if not cache then continue end
+        local animalList = cache.AnimalList
+        if typeof(animalList) ~= "table" then continue end
+
+        for slot, animalData in pairs(animalList) do
+            if type(animalData) == "table" then
+                local animalName = animalData.Index
+                local animalInfo = AnimalsData[animalName]
+                if not animalInfo then continue end
+
+                table.insert(newCache, {
+                    name = animalInfo.DisplayName or animalName,
+                    rawName = animalName,
+                    plot = plot.Name,
+                    slot = tostring(slot),
+                    uid = plot.Name .. "_" .. tostring(slot),
+                })
+            end
+        end
     end
-    return executeInternalStealAsync(prompt, animalData, durationOverride)
+    allAnimalsCache = newCache
+end
+
+-- =============================================================================
+-- TARGETING MODES (HIGHEST, PRIORITY, NEAREST)
+-- =============================================================================
+local Database = {}
+for k, v in pairs(AnimalsData) do
+    if type(v) == "table" and v.Generation then
+        Database[k] = v.Generation
+        if v.DisplayName then Database[v.DisplayName] = v.Generation end
+    end
+end
+
+local function getHighestAnimal()
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local bestAnimal = nil
+    local maxGen = -1
+    local minDist = math.huge
+
+    for _, animalData in ipairs(allAnimalsCache) do
+        if isMyBaseAnimal(animalData) then continue end
+        local pos = getAnimalPosition(animalData)
+        if pos then
+            local dist = (hrp.Position - pos).Magnitude
+            if dist <= 1000 then -- AUTO_STEAL_PROX_RADIUS
+                local gen = Database[animalData.rawName] or Database[animalData.name] or 0
+                if gen > maxGen then
+                    maxGen = gen
+                    bestAnimal = animalData
+                    minDist = dist
+                elseif gen == maxGen and dist < minDist then
+                    bestAnimal = animalData
+                    minDist = dist
+                end
+            end
+        end
+    end
+    return bestAnimal
+end
+
+local function findPromptInPodium(podium)
+    if not podium then return nil, nil end
+    local base = podium:FindFirstChild("Base")
+    local spawn = base and base:FindFirstChild("Spawn")
+    local attach = spawn and spawn:FindFirstChild("PromptAttachment")
+    if attach then
+        local p = attach:FindFirstChildOfClass("ProximityPrompt")
+        if p then
+            p.Enabled = true
+            return p, attach.WorldPosition
+        end
+    end
+    return nil, nil
+end
+
+local function getPriorityTarget()
+    local PS = getgenv().PrioritySystem
+    if not PS or not PS.SelectedData then return nil end
+    local d = PS.SelectedData
+    if not d.plot or not d.slot then return nil end
+    local plot = plots:FindFirstChild(d.plot)
+    if not plot then return nil end
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return nil end
+    local podium = podiums:FindFirstChild(tostring(d.slot))
+    if not podium then return nil end
+    local prompt, pos = findPromptInPodium(podium)
+    if not prompt or not pos then return nil end
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local dist = (hrp.Position - pos).Magnitude
+    if dist > 60 then return nil end -- PRIORITY_STEAL_RADIUS
+    return {
+        prompt = prompt,
+        position = pos,
+        petName = d.name or "?",
+        petValue = d.genValue or 0,
+        uid = d.plot .. "_" .. tostring(d.slot)
+    }
 end
 
 local function getNearestAnimal()
@@ -260,8 +410,10 @@ local function getNearestAnimal()
     if not hrp then return nil end
     local nearest, minDist = nil, math.huge
     for _, animalData in ipairs(allAnimalsCache) do
-        if not isMyBase(animalData.plot) and animalData.worldPosition then
-            local dist = (hrp.Position - animalData.worldPosition).Magnitude
+        if isMyBaseAnimal(animalData) then continue end
+        local pos = getAnimalPosition(animalData)
+        if pos then
+            local dist = (hrp.Position - pos).Magnitude
             if dist < minDist then
                 minDist = dist
                 nearest = animalData
@@ -271,49 +423,9 @@ local function getNearestAnimal()
     return nearest
 end
 
-local function startAutoSteal(durationOverride)
-    if stealConnection then stealConnection:Disconnect() end
-    autoStealEnabled = true
-    stealConnection = RunService.Heartbeat:Connect(function()
-        if not autoStealEnabled or IsStealingInternal then return end
-        local target = getNearestAnimal()
-        if not target or not shouldSteal(target) then return end
-        if LastTargetUID ~= target.uid then LastTargetUID = target.uid end
-        local prompt = PromptMemoryCache[target.uid]
-        if not prompt or not prompt.Parent then
-            prompt = findProximityPromptForAnimal(target)
-        end
-        if prompt then
-            attemptSteal(prompt, target, durationOverride)
-        end
-    end)
-end
-
-local function stopAutoSteal()
-    autoStealEnabled = false
-    if stealConnection then stealConnection:Disconnect() stealConnection = nil end
-    IsStealingInternal = false
-    StealProgressInternal = 0
-    CurrentStealTargetInternal = nil
-end
-
-task.spawn(initializeScanner)
-
-getgenv().LuminaAutoSteal = {
-    AllAnimalsCache = allAnimalsCache,
-    PromptMemoryCache = PromptMemoryCache,
-    InternalStealCache = InternalStealCache,
-    IsStealing = function() return IsStealingInternal end,
-    StealProgress = function() return StealProgressInternal end,
-    CurrentTarget = function() return CurrentStealTargetInternal end,
-    Start = function() startAutoSteal(1.0) end,
-    Stop = stopAutoSteal,
-    GetNearestAnimal = getNearestAnimal,
-    ShouldSteal = shouldSteal,
-    FindPrompt = findProximityPromptForAnimal,
-    AttemptSteal = attemptSteal
-}
-
+-- =============================================================================
+-- ENZO HUB (LUMINA) SETTINGS ENGINE
+-- =============================================================================
 local SAVE_KEY = "AutoGrab_Settings_" .. LocalPlayer.UserId
 local isInteractingWithSlider = false
 
@@ -333,7 +445,6 @@ getgenv().AutoGrabSystem = {
     IsStealing = false,
     StealProgress = 0,
     CurrentPetName = "",
-    StealDuration = 1.0,
     StealCount = 0,
     Running = true,
     GuiScale = 50,
@@ -374,136 +485,37 @@ end
 
 LoadSettings()
 
-local Database = {}
-pcall(function()
-    local m = require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
-    for k, v in pairs(m) do
-        if type(v) == "table" and v.Generation then
-            Database[k] = v.Generation
-            if v.DisplayName then Database[v.DisplayName] = v.Generation end
-        end
-    end
-end)
-
-local function findPromptInPodium(podium)
-    if not podium then return nil, nil end
-    local base = podium:FindFirstChild("Base")
-    local spawn = base and base:FindFirstChild("Spawn")
-    local attach = spawn and spawn:FindFirstChild("PromptAttachment")
-    if attach then
-        local p = attach:FindFirstChildOfClass("ProximityPrompt")
-        if p then
-            p.Enabled = true -- Bypass: Aktiviert die Prompt trotz Fremddiebstahl
-            return p, attach.WorldPosition
-        end
-    end
-    local podiumCenter = podium:GetPivot().Position
-    for _, d in pairs(podium:GetDescendants()) do
-        if d:IsA("ProximityPrompt") then
-            d.Enabled = true -- Bypass
-            local pos = nil
-            if d.Parent:IsA("Attachment") then
-                pos = d.Parent.WorldPosition
-            elseif d.Parent:IsA("BasePart") then
-                pos = d.Parent.Position
-            end
-            if pos and (pos - podiumCenter).Magnitude < 3 then
-                return d, pos
-            end
-        end
-    end
-    return nil, nil
-end
-
-local function getHighestAnimal()
-    local hrp = getHRP()
-    if not hrp then return nil end
-    local bestAnimal = nil
-    local maxGen = -1
-    local minDist = math.huge
-
-    for _, animalData in ipairs(allAnimalsCache) do
-        if not isMyBase(animalData.plot) and animalData.worldPosition then
-            local dist = (hrp.Position - animalData.worldPosition).Magnitude
-            if dist <= AUTO_STEAL_PROX_RADIUS then
-                local gen = Database[animalData.name] or 0
-                if gen > maxGen then
-                    maxGen = gen
-                    bestAnimal = animalData
-                    minDist = dist
-                elseif gen == maxGen and dist < minDist then
-                    bestAnimal = animalData
-                    minDist = dist
-                end
-            end
-        end
-    end
-    return bestAnimal
-end
-
-local function getPriorityTarget()
-    local PS = getgenv().PrioritySystem
-    if not PS or not PS.SelectedData then return nil end
-    local d = PS.SelectedData
-    if not d.plot or not d.slot then return nil end
-    local plots = Workspace:FindFirstChild("Plots")
-    if not plots then return nil end
-    local plot = plots:FindFirstChild(d.plot)
-    if not plot then return nil end
-    local podiums = plot:FindFirstChild("AnimalPodiums")
-    if not podiums then return nil end
-    local podium = podiums:FindFirstChild(tostring(d.slot))
-    if not podium then return nil end
-    local prompt, pos = findPromptInPodium(podium)
-    if not prompt or not pos then return nil end
-    local hrp = getHRP()
-    if not hrp then return nil end
-    local dist = (hrp.Position - pos).Magnitude
-    if dist > PRIORITY_STEAL_RADIUS then
-        return nil -- Keine Interaktion wenn weiter als 60 Studs weg!
-    end
-    return {
-        prompt = prompt,
-        position = pos,
-        petName = d.name or "?",
-        petValue = d.genValue or 0,
-        uid = d.plot .. "_" .. tostring(d.slot)
-    }
-end
-
 local function getTarget()
     if AG.Mode == "Priority" then
-        return getPriorityTarget() -- AUSSCHLIEßLICH PRIORITY! Kein Fallback mehr auf andere Tiere!
+        return getPriorityTarget()
     elseif AG.Mode == "Highest" then
         local highest = getHighestAnimal()
         if highest then
-            local LAS = getgenv().LuminaAutoSteal
-            local prompt = LAS and LAS.FindPrompt(highest)
+            local prompt = findProximityPromptForAnimal(highest)
             if prompt then
                 return {
                     prompt = prompt,
-                    position = highest.worldPosition,
+                    position = getAnimalPosition(highest),
                     petName = highest.name or "?",
-                    petValue = Database[highest.name] or 0,
+                    petValue = Database[highest.rawName] or 0,
                     uid = highest.uid
                 }
             end
         end
     else
-        local LAS = getgenv().LuminaAutoSteal
-        if not LAS then return nil end
-        local nearest = LAS.GetNearestAnimal()
-        if not nearest then return nil end
-        if not LAS.ShouldSteal(nearest) then return nil end
-        local prompt = LAS.FindPrompt(nearest)
-        if not prompt then return nil end
-        return {
-            prompt = prompt,
-            position = nearest.worldPosition,
-            petName = nearest.name or "?",
-            petValue = Database[nearest.name] or 0,
-            uid = nearest.uid
-        }
+        local nearest = getNearestAnimal()
+        if nearest then
+            local prompt = findProximityPromptForAnimal(nearest)
+            if prompt then
+                return {
+                    prompt = prompt,
+                    position = getAnimalPosition(nearest),
+                    petName = nearest.name or "?",
+                    petValue = Database[nearest.rawName] or 0,
+                    uid = nearest.uid
+                }
+            end
+        end
     end
     return nil
 end
@@ -552,8 +564,6 @@ local ragdollEndTime = 0
 local function startRagdollCooldown()
     ragdollCooldown = true
     ragdollEndTime = tick() + 2
-    local LAS = getgenv().LuminaAutoSteal
-    if LAS then LAS.Stop() end
 end
 
 local function inRagdollCooldown()
@@ -583,62 +593,50 @@ LocalPlayer.CharacterAdded:Connect(function()
     setupRagdollListener()
 end)
 
+-- =============================================================================
+-- EXKLU-STEAL THREAD (KAWAI CORE INTEGRATED INTO ENZO LOOP)
+-- =============================================================================
 local thread
 thread = coroutine.create(function()
     while AG.Running do
         local ok, err = pcall(function()
-            if inRagdollCooldown() then
+            if inRagdollCooldown() or not AG.Active then
                 AG.IsStealing = false
                 AG.CurrentPetName = ""
                 AG.StealProgress = 0
-                local LAS = getgenv().LuminaAutoSteal
-                if LAS then LAS.Stop() end
                 return
             end
-            if not AG.Active then
-                AG.IsStealing = false
-                AG.CurrentPetName = ""
-                AG.StealProgress = 0
-                local LAS = getgenv().LuminaAutoSteal
-                if LAS then LAS.Stop() end
-                return
-            end
-            local LAS = getgenv().LuminaAutoSteal
-            if not LAS then return end
+
             local target = getTarget()
             if not target or not target.prompt or not target.prompt.Parent then
                 AG.IsStealing = false
                 AG.CurrentPetName = ""
-                LAS.Stop()
                 return
             end
-            LAS.Start()
 
             AG.IsStealing = true
             AG.CurrentPetName = target.petName
             AG.StealProgress = 0
 
-            LAS.AttemptSteal(
-                target.prompt,
-                {uid = target.uid, worldPosition = target.position, name = target.petName},
-                AG.StealDuration
-            )
+            -- Call Kawai Core execution
+            attemptSteal(target.prompt, {
+                uid = target.uid, 
+                slot = string.split(target.uid, "_")[2], 
+                plot = string.split(target.uid, "_")[1], 
+                name = target.petName
+            })
 
             local startTime = tick()
-            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
+            local dur = CONFIG.HOLD_MAX
 
-            while tick() - startTime < (dur + 0.1) do
+            while StealState.active do
                 if inRagdollCooldown() then
                     AG.IsStealing = false
                     AG.CurrentPetName = ""
                     AG.StealProgress = 0
-                    LAS.Stop()
-                    return
-                end
-
-                if not target.prompt or not target.prompt.Parent then
                     break
                 end
+                if not target.prompt or not target.prompt.Parent then break end
 
                 AG.StealProgress = math.clamp((tick() - startTime) / dur, 0, 1)
 
@@ -647,13 +645,7 @@ thread = coroutine.create(function()
                     AG.StealProgress = 1
                     break
                 end
-
                 task.wait(1/60)
-            end
-
-            if AG.StealProgress < 1 then
-                AG.StealProgress = 1
-                task.wait(0.1)
             end
 
             AG.IsStealing = false
@@ -666,80 +658,17 @@ thread = coroutine.create(function()
 end)
 coroutine.resume(thread)
 
+-- Background Scanner Loop
 task.spawn(function()
     while AG.Running do
+        scanAllPlots()
         task.wait(5)
-        if coroutine.status(thread) == "dead" then
-            thread = coroutine.create(function()
-                while AG.Running do
-                    local ok, err = pcall(function()
-                        if inRagdollCooldown() then
-                            AG.IsStealing = false
-                            AG.CurrentPetName = ""
-                            AG.StealProgress = 0
-                            local LAS = getgenv().LuminaAutoSteal
-                            if LAS then LAS.Stop() end
-                            return
-                        end
-                        if not AG.Active then
-                            AG.IsStealing = false
-                            AG.CurrentPetName = ""
-                            AG.StealProgress = 0
-                            local LAS = getgenv().LuminaAutoSteal
-                            if LAS then LAS.Stop() end
-                            return
-                        end
-                        local LAS = getgenv().LuminaAutoSteal
-                        if not LAS then return end
-                        local target = getTarget()
-                        if target and target.prompt and target.prompt.Parent then
-                            LAS.Start()
-                            AG.IsStealing = true
-                            AG.CurrentPetName = target.petName
-
-                            local st = tick()
-                            local dur = target.prompt.HoldDuration and target.prompt.HoldDuration > 0 and target.prompt.HoldDuration or AG.StealDuration
-
-                            LAS.AttemptSteal(
-                                target.prompt,
-                                {uid = target.uid, worldPosition = target.position, name = target.petName},
-                                AG.StealDuration
-                            )
-
-                            while tick() - st < (dur + 0.1) do
-                                if inRagdollCooldown() then
-                                    AG.IsStealing = false
-                                    AG.CurrentPetName = ""
-                                    AG.StealProgress = 0
-                                    LAS.Stop()
-                                    return
-                                end
-                                if not target.prompt or not target.prompt.Parent then break end
-
-                                AG.StealProgress = math.clamp((tick() - st) / dur, 0, 1)
-
-                                if detectSteal() then
-                                    AG.StealCount = AG.StealCount + 1
-                                    AG.StealProgress = 1
-                                    break
-                                end
-                                task.wait(1/60)
-                            end
-
-                            AG.IsStealing = false
-                            AG.CurrentPetName = ""
-                            AG.StealProgress = 0
-                        end
-                    end)
-                    if not ok then warn("AutoGrab watchdog error:", err) end
-                    task.wait(0.15)
-                end
-            end)
-            coroutine.resume(thread)
-        end
     end
 end)
 
+-- =============================================================================
+-- ORIGINAL ENZO HUB (LUMINA) GUI ASSEMBLY
+-- =============================================================================
 local gui = LocalPlayer:WaitForChild("PlayerGui")
 local Screen = Instance.new("ScreenGui")
 Screen.Name = "AutoGrabPanel"
@@ -1196,6 +1125,7 @@ task.defer(function()
     OpenButton.Visible = false
 end)
 
+-- UI-Update-Loop (Konvertiert Daten aus dem Kawai Thread auf das Enzo Design)
 task.spawn(function()
     while AG.Running and Screen and Screen.Parent do
         Count.Text = tostring(AG.StealCount)
@@ -1277,7 +1207,8 @@ function AG.Disable()
     AG.Active = false
     AG.Running = false
     SaveSettings()
-    local LAS = getgenv().LuminaAutoSteal
-    if LAS then LAS.Stop() end
     if AG.ScreenGui then AG.ScreenGui:Destroy() end
 end
+
+-- Erste schnelle Replikation laden
+scanAllPlots()
